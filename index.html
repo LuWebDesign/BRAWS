@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>BRAWLBOTS</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%23050a0e' stroke='%2300c8ff' stroke-width='2'/><circle cx='16' cy='16' r='7' fill='%23cc44ff'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- ══ PANTALLA: INICIO ═══════════════════════════════════════════════════ -->
+  <div id="screen-home" class="screen active">
+    <div class="home-bg"><div class="particles" id="particles"></div></div>
+    <div class="home-content">
+
+      <div class="logo">
+        <span class="logo-brawl">BRAWL</span><span class="logo-bots">BOTS</span>
+        <div class="logo-sub">ARENA BATTLE · ONLINE</div>
+      </div>
+
+      <div class="home-form card">
+        <div class="form-group">
+          <label>NICKNAME</label>
+          <input type="text" id="nickname-input" placeholder="Tu nombre..." maxlength="16" autocomplete="off" spellcheck="false">
+        </div>
+
+        <div class="form-group">
+          <label>CLASE DE BOT</label>
+          <div class="bot-classes" id="bot-class-selector">
+            <div class="bot-class active" data-class="brawler" title="Equilibrado">
+              <div class="bot-preview" style="--c:#cc44ff"></div>
+              <span>Brawler</span><small>Equilibrado</small>
+            </div>
+            <div class="bot-class" data-class="scout" title="Velocidad +60%">
+              <div class="bot-preview" style="--c:#00ffcc"></div>
+              <span>Scout</span><small>Veloz</small>
+            </div>
+            <div class="bot-class" data-class="tank" title="Empuje +50%, lento">
+              <div class="bot-preview" style="--c:#ff6644"></div>
+              <span>Tank</span><small>Pesado</small>
+            </div>
+            <div class="bot-class" data-class="runner" title="Agilidad +20%">
+              <div class="bot-preview" style="--c:#ffdd00"></div>
+              <span>Runner</span><small>Ágil</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>COLOR</label>
+          <div class="color-picker" id="color-picker">
+            <div class="color-swatch active" data-color="#cc44ff" style="background:#cc44ff"></div>
+            <div class="color-swatch" data-color="#00ffcc" style="background:#00ffcc"></div>
+            <div class="color-swatch" data-color="#ff6644" style="background:#ff6644"></div>
+            <div class="color-swatch" data-color="#ffdd00" style="background:#ffdd00"></div>
+            <div class="color-swatch" data-color="#4488ff" style="background:#4488ff"></div>
+            <div class="color-swatch" data-color="#ff4488" style="background:#ff4488"></div>
+            <div class="color-swatch" data-color="#44ff88" style="background:#44ff88"></div>
+            <div class="color-swatch" data-color="#ff8800" style="background:#ff8800"></div>
+          </div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-primary" id="btn-create">⚡ CREAR SALA</button>
+          <button class="btn btn-secondary" id="btn-join-list">🔍 UNIRSE</button>
+        </div>
+        <button class="btn btn-secondary" id="btn-leaderboard" style="width:100%;margin-top:8px">🏆 RANKING GLOBAL</button>
+      </div>
+
+      <div class="home-footer">
+        <div class="ping-display" id="ping-display">PING: --ms</div>
+        <button class="btn-icon" id="btn-settings-home" title="Configuración de audio">🔊</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ PANTALLA: SALAS ════════════════════════════════════════════════════ -->
+  <div id="screen-rooms" class="screen">
+    <div class="screen-header">
+      <button class="btn-back" id="btn-back-rooms">← VOLVER</button>
+      <h2>SALAS DISPONIBLES</h2>
+      <button class="btn btn-sm" id="btn-refresh-rooms">↻ REFRESH</button>
+    </div>
+
+    <div class="rooms-list" id="rooms-list">
+      <div class="empty-state">Buscando salas...</div>
+    </div>
+
+    <div class="join-code-area card">
+      <label>¿TENÉS CÓDIGO DE SALA?</label>
+      <div class="join-code-row">
+        <input type="text" id="room-code-input" placeholder="ABC123" maxlength="6" style="text-transform:uppercase;letter-spacing:4px">
+        <button class="btn btn-primary" id="btn-join-code">ENTRAR</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ PANTALLA: LOBBY ════════════════════════════════════════════════════ -->
+  <div id="screen-lobby" class="screen">
+    <div class="lobby-header">
+      <button class="btn-back" id="btn-back-lobby">← SALIR</button>
+      <h2>LOBBY</h2>
+      <div class="room-code-display">
+        <span class="code-label">SALA</span>
+        <span id="lobby-room-code" class="code-value">------</span>
+        <button class="btn-copy" id="btn-copy-code" title="Copiar código">📋</button>
+      </div>
+    </div>
+
+    <div class="lobby-body">
+      <!-- Lista de jugadores -->
+      <div class="lobby-left">
+        <div class="lobby-map-badge" id="lobby-map-badge">🗺 Mapa: —</div>
+        <div class="lobby-players" id="lobby-players"></div>
+        <div class="lobby-footer">
+          <span id="lobby-count" class="lobby-count">0/4 jugadores</span>
+          <button class="btn btn-primary btn-large" id="btn-start" disabled>INICIAR PARTIDA</button>
+        </div>
+      </div>
+
+      <!-- Chat del lobby -->
+      <div class="lobby-chat card">
+        <div class="chat-header">💬 CHAT</div>
+        <div class="chat-messages" id="chat-messages"></div>
+        <div class="chat-input-row">
+          <input type="text" id="chat-input" placeholder="Decí algo..." maxlength="80" autocomplete="off">
+          <button class="btn btn-sm btn-primary" id="btn-send-chat">→</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ PANTALLA: JUEGO ════════════════════════════════════════════════════ -->
+  <div id="screen-game" class="screen">
+
+    <!-- Countdown -->
+    <div id="countdown-overlay" class="countdown-overlay hidden">
+      <div class="countdown-bg"></div>
+      <div class="countdown-number" id="countdown-number">3</div>
+      <div class="countdown-label">¡PREPARATE!</div>
+    </div>
+
+    <!-- HUD superior -->
+    <div class="hud">
+      <div class="hud-left">
+        <div class="hud-box">
+          <span class="hud-label">VIVOS</span>
+          <span class="hud-value" id="hud-alive">0</span>
+        </div>
+        <div class="hud-map-name" id="hud-map-name"></div>
+      </div>
+      <div class="hud-center">
+        <div class="effect-indicators" id="effect-indicators"></div>
+      </div>
+      <div class="hud-right">
+        <div class="hud-box">
+          <span class="hud-label">PING</span>
+          <span class="hud-value" id="hud-ping">--</span>
+        </div>
+        <button class="btn-icon hud-btn" id="btn-audio-toggle" title="Toggle audio">🔊</button>
+      </div>
+    </div>
+
+    <!-- Kill feed (arriba a la derecha) -->
+    <div class="kill-feed" id="kill-feed"></div>
+
+    <!-- Canvas -->
+    <canvas id="game-canvas"></canvas>
+
+    <!-- Controles mobile -->
+    <div class="mobile-controls" id="mobile-controls">
+      <div class="joystick-area" id="joystick-area">
+        <div class="joystick-base">
+          <div class="joystick-thumb" id="joystick-thumb"></div>
+        </div>
+      </div>
+      <button class="btn-special" id="btn-special">
+        <span class="special-icon">💥</span>
+        <svg class="cooldown-ring-svg" viewBox="0 0 44 44">
+          <circle class="cooldown-track" cx="22" cy="22" r="18"/>
+          <circle class="cooldown-fill" id="cooldown-ring" cx="22" cy="22" r="18"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Barra especial (PC) -->
+    <div class="special-bar-pc" id="special-bar-pc">
+      <div class="special-bar-label">ESPECIAL <kbd>SPACE</kbd></div>
+      <div class="special-bar-track">
+        <div class="special-bar-fill" id="special-bar-fill"></div>
+      </div>
+      <div class="special-ready-glow" id="special-ready-glow"></div>
+    </div>
+
+  </div>
+
+  <!-- ══ PANTALLA: GAME OVER ════════════════════════════════════════════════ -->
+  <div id="screen-gameover" class="screen">
+    <div class="gameover-content">
+      <div class="winner-display" id="winner-display">
+        <div class="winner-crown" id="winner-crown">👑</div>
+        <div class="winner-name" id="winner-name">GANADOR</div>
+        <div class="winner-subtitle" id="winner-subtitle">¡VICTORIOSO!</div>
+      </div>
+
+      <div class="results-table card" id="results-table"></div>
+
+      <div class="gameover-actions">
+        <button class="btn btn-primary btn-large" id="btn-play-again">⚡ REVANCHA</button>
+        <button class="btn btn-secondary" id="btn-back-home">🏠 INICIO</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ MODAL: SETTINGS DE AUDIO ══════════════════════════════════════════ -->
+  <div id="modal-settings" class="modal hidden">
+    <div class="modal-backdrop" id="modal-backdrop"></div>
+    <div class="modal-box card">
+      <div class="modal-header">
+        <h3>🔊 AUDIO</h3>
+        <button class="modal-close" id="modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="setting-row">
+          <label>Efectos de Sonido</label>
+          <button class="btn-toggle active" id="toggle-sfx">ON</button>
+        </div>
+        <div class="setting-row">
+          <label>Música</label>
+          <button class="btn-toggle active" id="toggle-music">ON</button>
+        </div>
+        <div class="setting-row">
+          <label>Volumen SFX</label>
+          <input type="range" id="vol-sfx" min="0" max="100" value="70" class="slider">
+        </div>
+        <div class="setting-row">
+          <label>Volumen Música</label>
+          <input type="range" id="vol-music" min="0" max="100" value="40" class="slider">
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══ PANTALLA: LEADERBOARD ═════════════════════════════════════════════ -->
+  <div id="screen-leaderboard" class="screen">
+    <div class="screen-header">
+      <button class="btn-back" id="btn-back-leaderboard">← VOLVER</button>
+      <h2>🏆 RANKING GLOBAL</h2>
+      <button class="btn btn-sm" id="btn-refresh-lb">↻</button>
+    </div>
+    <div class="leaderboard-body" id="leaderboard-body">
+      <div class="empty-state">Cargando ranking...</div>
+    </div>
+  </div>
+
+  <!-- ══ TOASTS ════════════════════════════════════════════════════════════ -->
+  <div id="toast-container"></div>
+
+  <!-- Scripts -->
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="utils.js"></script>
+  <script src="audio.js"></script>
+  <script src="renderer.js"></script>
+  <script src="input.js"></script>
+  <script src="game.js"></script>
+  <script src="ui.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

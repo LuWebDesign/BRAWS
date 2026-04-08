@@ -1,0 +1,18 @@
+{
+  "name": "brawlbots",
+  "version": "1.0.0",
+  "description": "Juego de arena battle multijugador online.   **Stack:** Node.js · Socket.io · Canvas 2D · SQLite",
+  "main": "main.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "better-sqlite3": "^12.8.0",
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3"
+  }
+}
