@@ -1,164 +1,82 @@
-# 🤖 BRAWLBOTS v3
+# BRAWS
 
-Juego de arena battle multijugador online.  
-**Stack:** Node.js · Socket.io · Canvas 2D · SQLite
+Juego de arena multijugador online ejecutado con Node.js, Socket.IO, Canvas 2D y SQLite.
 
----
+> La imagen de referencia de BRAWS v4 es una dirección visual futura. El gameplay actual conserva la versión de arena con bots, empujes, obstáculos, boosts y powerups; la evolución hacia combate con armas/proyectiles se hará en fases posteriores.
 
-## 🚀 Setup rápido
+## Requisitos
+
+- Node.js 24 o compatible con las dependencias instaladas.
+- npm.
+
+## Instalación y arranque
 
 ```bash
-cd server
 npm install
-npm run dev          # dev con auto-restart
-# npm start          # producción
+npm run dev
 ```
 
-Abrir `client/index.html` en el navegador  
-(o `npx serve client -p 8080` para servidor HTTP local).
+El servidor queda disponible en:
 
-Probar multijugador: abrir **2+ pestañas** en el mismo navegador.
-
----
-
-## 📁 Estructura
-
-```
-brawlbots/
-├── server/
-│   ├── server.js      ← Express + Socket.io, API REST, cleanup
-│   ├── gameRoom.js    ← Game loop 60Hz, física, bots, delta compression
-│   ├── botAI.js       ← IA de bots (HUNT / FLEE / GRAB / DODGE)
-│   ├── db.js          ← SQLite: leaderboard, historial de partidas
-│   └── package.json
-│
-└── client/
-    ├── index.html     ← 6 pantallas (home, rooms, lobby, game, gameover, leaderboard)
-    ├── css/style.css  ← UI cyberpunk dark
-    └── js/
-        ├── audio.js   ← Web Audio API procedural (sin archivos externos)
-        ├── renderer.js← Canvas 2D: arena, bots, obstáculos, boost zones, FX
-        ├── input.js   ← WASD + joystick virtual mobile
-        ├── game.js    ← Socket.io client, game loop, HUD, espectador
-        ├── ui.js      ← Pantallas, lobby, chat, kill feed, leaderboard
-        ├── main.js    ← Entry point, bindings de UI
-        └── utils.js   ← Helpers
+```text
+http://localhost:3001
 ```
 
----
+Para producción:
 
-## 🎮 Controles
-
-| Acción           | PC                | Mobile              |
-|------------------|-------------------|---------------------|
-| Mover            | WASD / Flechas    | Joystick izquierdo  |
-| Especial (dash)  | ESPACIO           | Botón 💥 derecho    |
-| Cambiar espectador| TAB (al morir)   | —                   |
-| Toggle música    | M                 | —                   |
-| Settings audio   | ESC               | Botón 🔊 en HUD     |
-
----
-
-## 🧠 Clases de bot
-
-| Clase   | Velocidad | Tamaño | Empuje | Rol                |
-|---------|-----------|--------|--------|--------------------|
-| Brawler | ●●●       | ●●●    | ●●●●   | Equilibrado        |
-| Scout   | ●●●●●     | ●●     | ●●     | Hit & run          |
-| Tank    | ●●        | ●●●●●  | ●●●●●  | Empujador pesado   |
-| Runner  | ●●●●      | ●●●    | ●●●    | Ágil y escurridizo |
-
----
-
-## 🗺️ Mapas
-
-| Mapa            | Obstáculos | Boost Zones | Descripción                        |
-|-----------------|------------|-------------|------------------------------------|
-| Arena Circular  | ✗          | 4 (cruz)    | Limpio, ideal para aprender        |
-| Pilares         | 5 pilares  | 2 laterales | Control de espacios                |
-| Cruz            | 5 pilares  | 4 esquinas  | Caótico, muchos rebotes            |
-
----
-
-## 💊 Power-ups
-
-| Ítem        | Duración | Efecto                        |
-|-------------|----------|-------------------------------|
-| ⚡ Velocidad | 4s       | +60% velocidad de movimiento  |
-| 🛡 Escudo   | 5s       | Absorbe empujes (inmune)      |
-| 💥 Gigante  | 3s       | +30% tamaño y fuerza de empuje|
-
----
-
-## 🤖 Bot IA
-
-Los bots se agregan automáticamente cuando hay menos de 2 jugadores.  
-Estados de comportamiento:
-
-- **HUNT** — persigue al jugador más vulnerable (cerca del borde)
-- **FLEE** — se aleja del borde cuando está en peligro  
-- **GRAB** — va a buscar el power-up más cercano  
-- **DODGE** — evade a enemigos que vienen rápido
-
-Dificultad configurable en `botAI.js` → constante `DIFFICULTY` (0–1).
-
----
-
-## 🔒 Anti-cheat
-
-- **Input rate limiting:** >125 inputs/s genera warnings; 15 warnings → input ignorado
-- **Valor clamping:** dx/dy forzados entre -1 y 1 en el servidor
-- **Servidor autoritativo:** toda la física corre en el servidor, el cliente solo renderiza
-
----
-
-## 🏆 API REST
-
-```
-GET /api/rooms          → Salas públicas en lobby
-GET /api/leaderboard    → Top 25 jugadores (requiere better-sqlite3)
-GET /api/player/:nick   → Stats individuales
-GET /api/matches        → Últimas 10 partidas
-```
-
----
-
-## 🚀 Deploy
-
-### Railway (recomendado)
 ```bash
-# 1. Subir repo a GitHub
-# 2. Conectar en railway.app → New Project → Deploy from GitHub
-# 3. Variables de entorno: PORT=3001
-# El cliente se sirve desde Express (express.static)
+npm start
 ```
 
-### Separado (Vercel frontend + Railway backend)
-Cambiar en `main.js`:
-```js
-const SERVER_URL = 'https://tu-backend.railway.app';
-```
+`npm run dev` usa `node --watch` y reinicia el servidor cuando cambia un archivo JavaScript. No es necesario abrir el HTML con `file://` ni ejecutar un servidor frontend separado.
 
----
+## Estructura actual
 
-## 📈 Escalar
+El repositorio utiliza una estructura plana en la raíz:
 
-| Escala       | Solución                                          |
-|--------------|---------------------------------------------------|
-| ~50 rooms    | Esta arquitectura, proceso único                  |
-| ~200 rooms   | `cluster` + Redis adapter para Socket.io          |
-| ~1000+ rooms | Microservicios: lobby server + N game servers     |
-| Global       | Regiones geográficas + UDP via WebRTC DataChannels|
+- `server.js`: Express, archivos estáticos, API REST y Socket.IO.
+- `gameRoom.js`: salas, estado de partida, loop de simulación, física, colisiones, bots y powerups.
+- `snapshotSystem.js`: serialización de snapshots completos para la red.
+- `inputQueue.js`: validación, orden y acknowledgements de inputs recibidos.
+- `botAI.js`: decisiones y movimiento de bots.
+- `db.js`: persistencia SQLite del ranking e historial.
+- `game.js`: conexión Socket.IO, eventos del cliente, HUD y loop de render.
+- `renderer.js`: renderizado Canvas, cámara e interpolación visual básica.
+- `input.js`: teclado, joystick mobile y habilidad especial.
+- `ui.js`: lobby, chat, pantallas, ranking y resultados.
+- `main.js`: composición y bindings de la interfaz.
+- `audio.js`: audio procedural mediante Web Audio API.
+- `utils.js`: utilidades compartidas del cliente.
+- `index.html` y `css/style.css`: interfaz y estilos.
 
----
+La documentación anterior que describía carpetas `server/` y `client/` estaba desactualizada.
 
-## 📦 Dependencias
+## Funcionalidades actuales
 
-```json
-{
-  "express":        "HTTP + static files",
-  "socket.io":      "WebSockets multiplayer",
-  "cors":           "CORS para desarrollo",
-  "better-sqlite3": "Persistencia (opcional — graceful degradation)"
-}
-```
+- Salas públicas y privadas.
+- Lobby, countdown y partidas multijugador.
+- Servidor autoritativo para movimiento y colisiones.
+- Bots con estados HUNT, FLEE, GRAB y DODGE.
+- Tres mapas con obstáculos y boost zones.
+- Powerups de velocidad, escudo y tamaño.
+- Dash, muerte, espectador y condición de victoria.
+- Chat de lobby.
+- Ranking e historial persistidos en SQLite.
+- UI responsive con controles mobile.
+
+## API REST
+
+- `GET /api/rooms`: salas públicas disponibles.
+- `GET /api/leaderboard`: top 25.
+- `GET /api/player/:nickname`: estadísticas de un jugador.
+- `GET /api/matches`: últimas partidas.
+
+## Scripts
+
+- `npm run dev`: servidor con reinicio automático usando Node.
+- `npm start`: servidor normal.
+- `npm test`: ejecuta los tests Node disponibles.
+
+## Estado del refactor BRAWS v4
+
+La Fase 1 garantiza instalación y arranque confiables. Las fases siguientes separarán el loop de física del envío de snapshots, formalizarán el protocolo de inputs y agregarán prediction/reconciliation/interpolación de snapshots sin quitar la autoridad del servidor.

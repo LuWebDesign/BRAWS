@@ -3,21 +3,26 @@
  *
  * Clase central que maneja:
  * - Estado de la sala (lobby → countdown → playing → finished)
- * - Game loop autoritativo a 60 FPS
+ * - Loop de física autoritativo a 60 FPS
+ * - Loop de snapshots de red a 20 FPS
  * - Física: movimiento, colisiones, obstáculos, boost zones, límites
  * - Killer tracking (ventana de 3s para acreditar eliminación)
  * - Power-ups y efectos temporales
  * - Bot IA integrada (rellena salas con < MIN_PLAYERS reales)
- * - Delta compression en broadcastState
+ * - Serialización de snapshots de red mediante SnapshotSystem
  * - Persistencia via db.js (graceful degradation si no hay SQLite)
  */
 
 const { BotAI }             = require('./botAI');
 const { saveMatchResult }   = require('./db');
+const { SnapshotSystem } = require('./snapshotSystem');
+const { InputQueue } = require('./inputQueue');
 
 // ─── Constantes de física ─────────────────────────────────────────────────────
 const TICK_RATE         = 60;
 const TICK_MS           = 1000 / TICK_RATE;
+const SNAPSHOT_RATE     = 20;
+const SNAPSHOT_MS       = 1000 / SNAPSHOT_RATE;
 const ARENA_RADIUS      = 380;
 const PLAYER_RADIUS     = 22;
 const PLAYER_SPEED      = 220;
@@ -107,7 +112,8 @@ class GameRoom {
 
     this.state       = 'lobby';
     this.players     = new Map();   // id → playerState  (humanos + bots)
-    this.inputs      = new Map();   // id → último input
+    this.inputs      = new Map();   // id → último input aplicado
+    this.inputQueue  = new InputQueue();
     this.powerUps    = [];
     this.bots        = [];          // instancias BotAI activas
     this.chatHistory = [];
@@ -119,6 +125,7 @@ class GameRoom {
 
     // Timers
     this.gameLoop      = null;
+    this.snapshotLoop  = null;
     this.countdownTimer= null;
     this.powerUpTimer  = null;
 
@@ -126,8 +133,7 @@ class GameRoom {
     this.tickCount = 0;
     this.startTime = 0;
 
-    // Delta compression: último estado enviado por jugador
-    this._lastBroadcast = new Map();
+    this.snapshotSystem = new SnapshotSystem({ specialCooldown: SPECIAL_COOLDOWN });
 
     // Rate limiting de inputs: último timestamp de input por jugador
     this._inputTimestamps = new Map();
@@ -177,6 +183,7 @@ class GameRoom {
     });
 
     this.inputs.set(socket.id, { dx:0, dy:0, action:false });
+    this.inputQueue.addPlayer(socket.id);
     this._inputTimestamps.set(socket.id, 0);
     this._inputWarnings.set(socket.id, 0);
   }
@@ -184,7 +191,7 @@ class GameRoom {
   removePlayer(id) {
     this.players.delete(id);
     this.inputs.delete(id);
-    this._lastBroadcast.delete(id);
+    this.inputQueue.removePlayer(id);
     this._inputTimestamps.delete(id);
     this._inputWarnings.delete(id);
 
@@ -235,7 +242,6 @@ class GameRoom {
     this.startTime = Date.now();
     this.powerUps  = [];
     this.tickCount = 0;
-    this._lastBroadcast.clear();
 
     const now = Date.now();
     for (const p of this.players.values()) {
@@ -254,8 +260,9 @@ class GameRoom {
 
     this.powerUpTimer = setInterval(() => this.spawnPowerUp(), 8000);
     this.gameLoop     = setInterval(() => this.tick(), TICK_MS);
+    this.snapshotLoop = setInterval(() => this.broadcastState(Date.now()), SNAPSHOT_MS);
 
-    console.log(`[GAME] Partida iniciada en ${this.id} (${this.players.size} jugadores, mapa: ${this.mapKey})`);
+    console.log(`[GAME] Partida iniciada en ${this.id} (${this.players.size} jugadores, mapa: ${this.mapKey}; física: ${TICK_RATE}Hz, snapshots: ${SNAPSHOT_RATE}Hz)`);
   }
 
   // ─── Game Loop ─────────────────────────────────────────────────────────────
@@ -291,8 +298,7 @@ class GameRoom {
     this.updateEffects(now);
     this.checkPowerUpCollisions(now);
 
-    // 7. Broadcast (con delta compression)
-    this.broadcastState(now);
+    // 7. La transmisión de snapshots ocurre en un loop independiente.
 
     // 8. Win condition
     this.checkWinCondition();
@@ -301,8 +307,8 @@ class GameRoom {
   // ─── Input ─────────────────────────────────────────────────────────────────
 
   /**
-   * Rate limiting básico: máximo 70 inputs/s por jugador.
-   * Si supera, incrementa warnings. 10 warnings → kick (anti-cheat).
+   * Rate limiting básico: máximo 125 inputs/s por jugador.
+   * Los inputs válidos se encolan y se consumen en orden durante el tick.
    */
   handleInput(socketId, input) {
     const now   = Date.now();
@@ -324,15 +330,19 @@ class GameRoom {
 
     this._inputTimestamps.set(socketId, now);
 
-    // Clamping de valores para evitar cheats de movimiento
-    const dx = clamp(input.dx || 0, -1, 1);
-    const dy = clamp(input.dy || 0, -1, 1);
-
-    this.inputs.set(socketId, { dx, dy, action: !!input.action });
-    if (input.action) this.activateSpecial(socketId);
+    this.inputQueue.enqueue(socketId, input);
   }
 
   processInputs(dt, now) {
+    // Consumir inputs humanos en orden antes de aplicar movimiento.
+    for (const [id, player] of this.players) {
+      if (player.isBot) continue;
+      this.inputQueue.consume(id, received => {
+        this.inputs.set(id, { dx: received.dx, dy: received.dy, action: received.action });
+        if (received.action) this.activateSpecial(id);
+      });
+    }
+
     for (const [id, input] of this.inputs) {
       const p = this.players.get(id);
       if (!p || !p.alive) continue;
@@ -593,6 +603,7 @@ class GameRoom {
     if (this.state === 'finished') return;
     this.state = 'finished';
     clearInterval(this.gameLoop);
+    clearInterval(this.snapshotLoop);
     clearInterval(this.powerUpTimer);
 
     const results = Array.from(this.players.values())
@@ -651,43 +662,10 @@ class GameRoom {
     this.io.to(this.id).emit('back_to_lobby', { room: this.getPublicState() });
   }
 
-  // ─── Broadcast con delta compression ──────────────────────────────────────
+  // ─── Broadcast de snapshot completo ───────────────────────────────────────
 
   broadcastState(now) {
-    const players = [];
-
-    for (const p of this.players.values()) {
-      const prev = this._lastBroadcast.get(p.id) || {};
-
-      // Campos que siempre van
-      const entry = {
-        id:    p.id,
-        alive: p.alive,
-        x:     Math.round(p.x * 10) / 10,   // 1 decimal de precisión
-        y:     Math.round(p.y * 10) / 10,
-        vx:    Math.round(p.vx),
-        vy:    Math.round(p.vy),
-        angle: Math.round(p.angle * 100) / 100,
-        radius: Math.round(p.radius * 10) / 10,
-        specialReady:       p.specialCooldown <= now,
-        specialCooldownPct: p.specialCooldown <= now ? 1 : 1 - (p.specialCooldown - now) / SPECIAL_COOLDOWN,
-        hasShield:   !!(p.activeEffects.shield && p.activeEffects.shield > now),
-        hasSpeed:    !!(p.activeEffects.speed  && p.activeEffects.speed  > now),
-        isBig:       !!(p.activeEffects.big    && p.activeEffects.big    > now),
-        invincible:  p.invincibleUntil > now,
-        inBoostZone: p.inBoostZone,
-      };
-
-      players.push(entry);
-      this._lastBroadcast.set(p.id, entry);
-    }
-
-    this.io.to(this.id).emit('game_state', {
-      t:        now,
-      tick:     this.tickCount,
-      players,
-      powerUps: this.powerUps.map(p => ({ id:p.id, x:p.x, y:p.y, type:p.type, color:p.color }))
-    });
+    this.io.to(this.id).emit('game_state', this.snapshotSystem.create(this, now));
   }
 
   // ─── Chat ──────────────────────────────────────────────────────────────────
@@ -727,8 +705,10 @@ class GameRoom {
 
   destroy() {
     clearInterval(this.gameLoop);
+    clearInterval(this.snapshotLoop);
     clearInterval(this.powerUpTimer);
     clearInterval(this.countdownTimer);
+    this.inputQueue.clear();
     this.bots = [];
   }
 }

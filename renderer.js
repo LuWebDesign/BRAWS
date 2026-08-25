@@ -8,6 +8,55 @@
  * entre ticks del servidor (lag compensation visual).
  */
 
+class SnapshotBuffer {
+  constructor(maxSnapshots = 32) {
+    this.maxSnapshots = maxSnapshots;
+    this.snapshots = [];
+  }
+
+  clear() {
+    this.snapshots = [];
+  }
+
+  add(snapshot) {
+    if (!snapshot || !Number.isFinite(snapshot.t)) return;
+    this.snapshots.push({
+      t: snapshot.t,
+      players: snapshot.players.map(player => ({ ...player })),
+      powerUps: snapshot.powerUps || [],
+    });
+    while (this.snapshots.length > this.maxSnapshots) this.snapshots.shift();
+  }
+
+  sample(playerId, renderTime) {
+    if (!this.snapshots.length) return null;
+
+    let older = null;
+    let newer = null;
+    for (const snapshot of this.snapshots) {
+      const player = snapshot.players.find(candidate => candidate.id === playerId);
+      if (!player) continue;
+      if (snapshot.t <= renderTime) older = { snapshot, player };
+      if (snapshot.t >= renderTime) {
+        newer = { snapshot, player };
+        break;
+      }
+    }
+
+    if (!older) return newer?.player || null;
+    if (!newer || newer.snapshot.t === older.snapshot.t) return older.player;
+
+    const span = newer.snapshot.t - older.snapshot.t;
+    const factor = Math.max(0, Math.min(1, (renderTime - older.snapshot.t) / span));
+    return {
+      ...newer.player,
+      x: lerp(older.player.x, newer.player.x, factor),
+      y: lerp(older.player.y, newer.player.y, factor),
+      angle: lerpAngle(older.player.angle, newer.player.angle, factor),
+    };
+  }
+}
+
 class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
@@ -24,6 +73,8 @@ class Renderer {
     // Referencia al jugador local
     this.localPlayerId = null;
     this.localPlayerData = null;
+    this.predictedLocalState = null;
+    this.localCorrection = { x: 0, y: 0 };
     this.spectatorTarget = null; // id del jugador a seguir como espectador
     
     // Mapa
@@ -39,7 +90,9 @@ class Renderer {
     
     // Tiempo para interpolación
     this.lastStateTime = 0;
-    this.interpBuffer = 100;
+    this.interpolationDelay = 100;
+    this.serverClockOffset = null;
+    this.snapshotBuffer = new SnapshotBuffer();
     
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -55,9 +108,51 @@ class Renderer {
 
   // ─── Actualizar estado del servidor ──────────────────────────────────────
 
+  setPredictedLocalState(state) {
+    if (!state || !this.localPlayerId) return;
+    this.predictedLocalState = { ...state };
+    const player = this.players.get(this.localPlayerId);
+    if (!player) return;
+    player.x = state.x + this.localCorrection.x;
+    player.y = state.y + this.localCorrection.y;
+    player.vx = state.vx || 0;
+    player.vy = state.vy || 0;
+    player.angle = state.angle || 0;
+    player.alive = state.alive;
+  }
+
+  reconcileLocalState(state, smoothCorrection) {
+    if (!state || !this.localPlayerId) return;
+    const player = this.players.get(this.localPlayerId);
+    if (!player) return;
+
+    if (smoothCorrection) {
+      this.localCorrection.x = player.x - state.x;
+      this.localCorrection.y = player.y - state.y;
+    } else {
+      this.localCorrection.x = 0;
+      this.localCorrection.y = 0;
+    }
+
+    this.predictedLocalState = { ...state };
+    player.x = state.x + this.localCorrection.x;
+    player.y = state.y + this.localCorrection.y;
+    player.vx = state.vx || 0;
+    player.vy = state.vy || 0;
+    player.angle = state.angle || 0;
+    player.alive = state.alive;
+  }
+
   updateState(state) {
     const now = Date.now();
     this.lastStateTime = now;
+    this.snapshotBuffer.add(state);
+    if (Number.isFinite(state.t)) {
+      const measuredOffset = now - state.t;
+      this.serverClockOffset = this.serverClockOffset === null
+        ? measuredOffset
+        : this.serverClockOffset * 0.9 + measuredOffset * 0.1;
+    }
 
     for (const serverPlayer of state.players) {
       if (!this.players.has(serverPlayer.id)) {
@@ -89,12 +184,21 @@ class Renderer {
         });
       } else {
         const p = this.players.get(serverPlayer.id);
-        // Guardar posición actual como punto de partida
-        p.prevX = p.x;
-        p.prevY = p.y;
-        // Target = posición del servidor
-        p.targetX = serverPlayer.x;
-        p.targetY = serverPlayer.y;
+        const isLocal = serverPlayer.id === this.localPlayerId;
+        if (isLocal) {
+          // El jugador local se dibuja desde el estado predicho. Conservamos
+          // el estado del servidor para la futura fase de reconciliation.
+          p.authoritativeX = serverPlayer.x;
+          p.authoritativeY = serverPlayer.y;
+          p.authoritativeVx = serverPlayer.vx || 0;
+          p.authoritativeVy = serverPlayer.vy || 0;
+        } else {
+          // Los remotos sí interpolan entre snapshots.
+          p.prevX = p.x;
+          p.prevY = p.y;
+          p.targetX = serverPlayer.x;
+          p.targetY = serverPlayer.y;
+        }
         p.angle = serverPlayer.angle;
         p.alive = serverPlayer.alive;
         p.radius = serverPlayer.radius;
@@ -256,12 +360,24 @@ class Renderer {
     ctx.translate(W / 2 + this.camera.x + shakeX, H / 2 + this.camera.y + shakeY);
     ctx.scale(zoom, zoom);
 
-    // Interpolar posiciones de jugadores
-    const interpFactor = 0.25;
+    // Interpolar remotos desde snapshots históricos y decaer correcciones
+    // pequeñas del jugador local.
+    const serverNow = Date.now() - (this.serverClockOffset || 0);
+    const renderTime = serverNow - this.interpolationDelay;
     for (const player of this.players.values()) {
-      if (player.alive) {
-        player.x += (player.targetX - player.x) * interpFactor;
-        player.y += (player.targetY - player.y) * interpFactor;
+      if (player.id === this.localPlayerId && this.predictedLocalState) {
+        this.localCorrection.x *= 0.2;
+        this.localCorrection.y *= 0.2;
+        player.x = this.predictedLocalState.x + this.localCorrection.x;
+        player.y = this.predictedLocalState.y + this.localCorrection.y;
+      } else if (player.alive) {
+        const sample = this.snapshotBuffer.sample(player.id, renderTime);
+        if (sample) {
+          player.x = sample.x;
+          player.y = sample.y;
+          player.angle = sample.angle;
+          player.alive = sample.alive;
+        }
       }
     }
 
@@ -399,6 +515,46 @@ class Renderer {
     ctx.setLineDash([]);
   }
 
+  // ─── Boost zones ──────────────────────────────────────────────────────────
+
+  drawBoostZones(ctx, timestamp) {
+    if (!this.boostZones?.length) return;
+
+    for (const zone of this.boostZones) {
+      const pulse = Math.sin(timestamp * 0.003 + zone.x * 0.01) * 0.25 + 0.75;
+      const r = zone.radius;
+
+      ctx.save();
+      ctx.translate(zone.x, zone.y);
+      ctx.shadowColor = zone.color;
+      ctx.shadowBlur = 20 * pulse;
+      ctx.rotate((timestamp * 0.0008) % (Math.PI * 2));
+      ctx.setLineDash([8, 5]);
+      ctx.strokeStyle = zone.color;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.7 * pulse;
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.globalAlpha = 0.12 * pulse;
+      ctx.fillStyle = zone.color;
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.85, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.8 * pulse;
+      ctx.shadowBlur = 0;
+      ctx.font = `bold ${Math.round(r * 0.7)}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = zone.color;
+      ctx.fillText('⚡', 0, 0);
+      ctx.restore();
+    }
+  }
+
   // ─── Obstáculos del mapa ──────────────────────────────────────────────────
 
   drawObstacles(ctx, timestamp) {
@@ -501,6 +657,20 @@ class Renderer {
 
     ctx.save();
     ctx.translate(x, y);
+
+    if (player.inBoostZone) {
+      const pulse = Math.sin(timestamp * 0.008) * 0.3 + 0.7;
+      ctx.beginPath();
+      ctx.arc(0, 0, player.radius + 8 * pulse, 0, Math.PI * 2);
+      ctx.strokeStyle = '#00ffcc';
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.5 * pulse;
+      ctx.shadowColor = '#00ffcc';
+      ctx.shadowBlur = 12;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.shadowBlur = 0;
+    }
 
     // Parpadeo si invincible
     if (invincible && Math.floor(timestamp / 100) % 2 === 0) {
@@ -662,6 +832,11 @@ class Renderer {
 }
 
 // ─── Helpers de color ─────────────────────────────────────────────────────────
+function lerpAngle(a, b, t) {
+  let delta = (b - a + Math.PI) % (Math.PI * 2) - Math.PI;
+  return a + delta * t;
+}
+
 function hexToRgb(hex) {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
@@ -682,74 +857,3 @@ function darkenColor(hex, amount) {
     return `rgb(${Math.max(0, r - amount)}, ${Math.max(0, g - amount)}, ${Math.max(0, b - amount)})`;
   } catch { return hex; }
 }
-
-// ─── PATCH: drawBoostZones ────────────────────────────────────────────────────
-// Injected at end of file — called from render() above drawObstacles
-
-Renderer.prototype.drawBoostZones = function(ctx, timestamp) {
-  if (!this.boostZones?.length) return;
-
-  for (const zone of this.boostZones) {
-    const pulse = Math.sin(timestamp * 0.003 + zone.x * 0.01) * 0.25 + 0.75;
-    const r     = zone.radius;
-
-    ctx.save();
-    ctx.translate(zone.x, zone.y);
-
-    // Outer glow ring
-    ctx.shadowColor = zone.color;
-    ctx.shadowBlur  = 20 * pulse;
-
-    // Rotating dashed border
-    ctx.rotate((timestamp * 0.0008) % (Math.PI * 2));
-    ctx.setLineDash([8, 5]);
-    ctx.strokeStyle = zone.color;
-    ctx.lineWidth   = 2;
-    ctx.globalAlpha = 0.7 * pulse;
-    ctx.beginPath();
-    ctx.arc(0, 0, r, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Inner fill
-    ctx.rotate(0);
-    ctx.globalAlpha = 0.12 * pulse;
-    ctx.fillStyle   = zone.color;
-    ctx.beginPath();
-    ctx.arc(0, 0, r * 0.85, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Center ⚡ icon
-    ctx.globalAlpha  = 0.8 * pulse;
-    ctx.shadowBlur   = 0;
-    ctx.font         = `bold ${Math.round(r * 0.7)}px Arial`;
-    ctx.textAlign    = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle    = zone.color;
-    ctx.fillText('⚡', 0, 0);
-
-    ctx.restore();
-  }
-};
-
-// ─── PATCH: inBoostZone visual on player ─────────────────────────────────────
-// Override drawPlayer to add boost zone aura — called from existing drawPlayers()
-const _origDrawPlayer = Renderer.prototype.drawPlayer;
-Renderer.prototype.drawPlayer = function(ctx, player, timestamp) {
-  // Boost aura under the player
-  if (player.inBoostZone) {
-    ctx.save();
-    ctx.translate(player.x, player.y);
-    const pulse = Math.sin(timestamp * 0.008) * 0.3 + 0.7;
-    ctx.beginPath();
-    ctx.arc(0, 0, player.radius + 8 * pulse, 0, Math.PI * 2);
-    ctx.strokeStyle = '#00ffcc';
-    ctx.lineWidth   = 2;
-    ctx.globalAlpha = 0.5 * pulse;
-    ctx.shadowColor = '#00ffcc';
-    ctx.shadowBlur  = 12;
-    ctx.stroke();
-    ctx.restore();
-  }
-  _origDrawPlayer.call(this, ctx, player, timestamp);
-};
