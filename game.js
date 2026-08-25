@@ -17,7 +17,12 @@ class Game {
     this.isAlive       = true;
     this.animFrame     = null;
     this.lastInputSent = 0;
+    this.inputSequence = 0;
+    this.pendingInputs = [];
+    this.predictedLocalState = null;
+    this.predictedSpecialReadyAt = 0;
     this.INPUT_RATE    = 1000 / 60;
+    this.PREDICTION_DT = 1 / 60;
     this.ping          = 0;
     this.pingInterval  = null;
     this._prevVelocities = new Map();
@@ -80,9 +85,12 @@ class Game {
     s.on('game_started', ({ players, arenaRadius, map }) => {
       this.renderer.arenaRadius = arenaRadius;
       this.renderer.obstacles   = map?.obstacles || [];
+      this.renderer.boostZones   = map?.boostZones || [];
       this.renderer.mapKey      = map?.key || 'circle';
       this.renderer.resize();
       this.renderer.players.clear();
+      this.renderer.snapshotBuffer.clear();
+      this.renderer.serverClockOffset = null;
 
       for (const p of players) {
         this.renderer.players.set(p.id, {
@@ -93,8 +101,14 @@ class Game {
       }
 
       this.renderer.spectatorTarget = players.find(p => p.id !== s.id)?.id || null;
-      this.isAlive    = true;
-      this.gameActive = true;
+      this.isAlive       = true;
+      this.inputSequence = 0;
+      this.pendingInputs = [];
+      this.predictedSpecialReadyAt = 0;
+      this.predictedLocalState = players.find(p => p.id === s.id)
+        ? { ...players.find(p => p.id === s.id) }
+        : null;
+      this.gameActive    = true;
 
       if (this.hudMapName) this.hudMapName.textContent = map?.name || '';
       UI.clearKillFeed();
@@ -126,6 +140,7 @@ class Game {
       }
 
       this.renderer.updateState(state);
+      this._syncPredictedState(state.players.find(p => p.id === this.localPlayerId));
       this._updateHUD(state);
     });
 
@@ -133,6 +148,17 @@ class Game {
     s.on('player_dash', ({ playerId, dx, dy }) => {
       this.renderer.addDashEffect(playerId, dx, dy);
       if (playerId === s.id) audio.playDash();
+    });
+
+    s.on('wall_hit', ({ playerId }) => {
+      if (playerId === s.id) {
+        audio.playWallHit();
+        this.renderer.shakeCamera(4, 100);
+      }
+    });
+
+    s.on('collision_impact', ({ x, y, intensity }) => {
+      this.renderer.addCollisionSpark(x, y, intensity > 0.5 ? '#ffffff' : '#00c8ff');
     });
 
     // ── Eliminación ───────────────────────────────────────────────────────
@@ -209,8 +235,16 @@ class Game {
       const now = Date.now();
 
       if (now - this.lastInputSent >= this.INPUT_RATE) {
-        const input = this.input.getInput();
-        if (this.isAlive) this.socket.emit('player_input', input);
+        const input = {
+          ...this.input.getInput(),
+          seq: this.inputSequence++,
+        };
+        if (this.isAlive) {
+          this.pendingInputs.push(input);
+          this._applyLocalPrediction(input, this.PREDICTION_DT, now);
+          this.socket.emit('player_input', input);
+          this.renderer.setPredictedLocalState(this.predictedLocalState);
+        }
 
         // Sonido cuando el especial vuelve a estar disponible
         const local = this.renderer.players.get(this.localPlayerId);
@@ -236,6 +270,86 @@ class Game {
   _stopGameLoop() {
     if (this.animFrame) { cancelAnimationFrame(this.animFrame); this.animFrame = null; }
     this._prevVelocities.clear();
+    this.pendingInputs = [];
+    this.predictedLocalState = null;
+  }
+
+  _syncPredictedState(serverPlayer) {
+    if (!serverPlayer) return;
+
+    const acknowledged = Number.isSafeInteger(serverPlayer.lastProcessedInput)
+      ? serverPlayer.lastProcessedInput
+      : -1;
+    const previous = this.predictedLocalState;
+    this.pendingInputs = this.pendingInputs.filter(input => input.seq > acknowledged);
+
+    const predicted = {
+      ...serverPlayer,
+      x: serverPlayer.x,
+      y: serverPlayer.y,
+      vx: serverPlayer.vx || 0,
+      vy: serverPlayer.vy || 0,
+      angle: serverPlayer.angle || 0,
+    };
+
+    if (serverPlayer.specialReady) this.predictedSpecialReadyAt = 0;
+    this.predictedLocalState = predicted;
+
+    // Reconstruir el estado local desde la autoridad y reproducir únicamente
+    // inputs que el servidor aún no confirmó.
+    for (const input of this.pendingInputs) {
+      this._applyLocalPrediction(input, this.PREDICTION_DT, Date.now());
+    }
+
+    const correctionDistance = previous
+      ? Math.hypot(serverPlayer.x - previous.x, serverPlayer.y - previous.y)
+      : Infinity;
+    this.renderer.reconcileLocalState(
+      this.predictedLocalState,
+      correctionDistance <= 80
+    );
+  }
+
+  _applyLocalPrediction(input, dt, now) {
+    const p = this.predictedLocalState;
+    if (!p || !p.alive) return;
+
+    const dx = Number(input.dx) || 0;
+    const dy = Number(input.dy) || 0;
+    const length = Math.sqrt(dx * dx + dy * dy) || 1;
+    const classSpeed = { scout: 1.4, tank: 0.7, runner: 1.2, brawler: 1.0 }[p.botClass] || 1;
+    const pushMult = { scout: 0.8, tank: 1.5, runner: 0.9, brawler: 1.2 }[p.botClass] || 1.2;
+    const speedBoost = p.hasSpeed ? 1.6 : 1;
+    const boostMult = p.inBoostZone ? 1.35 : 1;
+    const speed = 220 * classSpeed * speedBoost * boostMult;
+
+    if (dx !== 0 || dy !== 0) {
+      const dirX = dx / length;
+      const dirY = dy / length;
+      p.vx = (p.vx || 0) + dirX * speed * dt * 8;
+      p.vy = (p.vy || 0) + dirY * speed * dt * 8;
+      const velocity = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+      if (velocity > speed) {
+        p.vx = p.vx / velocity * speed;
+        p.vy = p.vy / velocity * speed;
+      }
+      p.angle = Math.atan2(dirY, dirX);
+    } else {
+      p.vx = (p.vx || 0) * 0.88;
+      p.vy = (p.vy || 0) * 0.88;
+    }
+
+    if (input.action && now >= this.predictedSpecialReadyAt) {
+      const angle = Number.isFinite(p.angle) ? p.angle : 0;
+      p.vx += Math.cos(angle) * 480 * pushMult;
+      p.vy += Math.sin(angle) * 480 * pushMult;
+      this.predictedSpecialReadyAt = now + 5000;
+    }
+
+    p.x += (p.vx || 0) * dt;
+    p.y += (p.vy || 0) * dt;
+    p.vx *= 0.92;
+    p.vy *= 0.92;
   }
 
   // ─── HUD ────────────────────────────────────────────────────────────────
@@ -287,45 +401,3 @@ class Game {
   sendChat(message)                                  { this.socket.emit('chat_message', message); }
   cleanup() { this._stopGameLoop(); clearInterval(this.pingInterval); audio.stopMusic(); }
 }
-
-// ─── PATCH: extra socket events para boost zones, wall hit y scoreboard ───────
-
-const _origBind = Game.prototype._bindSocketEvents;
-Game.prototype._bindSocketEvents = function() {
-  _origBind.call(this);
-  const s = this.socket;
-
-  // Boost zones vienen en game_started → map.boostZones
-  const _origGS = s.listeners('game_started')[0];
-  // Ya está manejado en el handler existente que asigna renderer.obstacles
-  // Solo necesitamos también asignar boostZones:
-  s.on('game_started_boost_patch', () => {}); // placeholder
-
-  // Golpe contra obstáculo
-  s.on('wall_hit', ({ playerId }) => {
-    if (playerId === this.socket.id) {
-      audio.playWallHit();
-      this.renderer.shakeCamera(4, 100);
-    }
-  });
-
-  // Collision impact sonido
-  s.on('collision_impact', ({ intensity }) => {
-    // El audio ya se dispara via detección de delta-v en game_state
-    // Este evento es para efectos de partícula en posición exacta si se quisiera
-  });
-};
-
-// Patch game_started para incluir boostZones
-const _origStart = Game.prototype._bindSocketEvents;
-// Monkey-patch directo en connect para que game_started asigne boostZones
-const _origConnect = Game.prototype.connect;
-Game.prototype.connect = function(serverUrl) {
-  const result = _origConnect.call(this, serverUrl);
-  // Reemplazar el handler de game_started existente con uno extendido
-  this.socket.on('game_started', ({ players, arenaRadius, map }) => {
-    // boostZones
-    if (this.renderer) this.renderer.boostZones = map?.boostZones || [];
-  });
-  return result;
-};
